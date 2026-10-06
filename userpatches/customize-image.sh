@@ -24,8 +24,9 @@ apt-get -y install --no-install-recommends alsa-utils adbd
 apt-get -y install --no-install-recommends gcc make pkg-config libasound2-dev libc6-dev
 cp -r /tmp/overlay/build /tmp/ac108-plugin
 make -C /tmp/ac108-plugin -f plugin-Makefile
-install -m 644 /tmp/ac108-plugin/libasound_module_pcm_ac108.so \
-    /usr/lib/$(gcc --print-multiarch)/alsa-lib/
+# install -D: the alsa-lib plugin dir does not exist until a plugin ships it
+install -D -m 644 /tmp/ac108-plugin/libasound_module_pcm_ac108.so \
+    /usr/lib/$(gcc --print-multiarch)/alsa-lib/libasound_module_pcm_ac108.so
 apt-get -y purge gcc make pkg-config libasound2-dev libc6-dev
 apt-get -y autoremove
 
