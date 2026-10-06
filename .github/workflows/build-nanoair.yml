@@ -1,0 +1,59 @@
+name: build-nanoair-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_minimal:
+        description: "BUILD_MINIMAL (yes = smallest server image)"
+        default: "yes"
+        type: choice
+        options: ["yes", "no"]
+      release:
+        description: "Userspace release"
+        default: trixie
+        type: choice
+        options: [trixie, bookworm]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Checkout build framework (this repo, with userpatches)
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules \
+            /usr/share/swift /usr/lib/jvm || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Prepare build host
+        run: |
+          sudo ./compile.sh requirements
+          sudo chown -R "$USER":"$USER" .
+
+      - name: Build image
+        run: |
+          ./compile.sh build \
+            BOARD=nanopiair \
+            BRANCH=current \
+            RELEASE=${{ inputs.release || 'trixie' }} \
+            BUILD_MINIMAL=${{ inputs.build_minimal || 'yes' }} \
+            EXPERT=yes \
+            KERNEL_CONFIGURE=no \
+            ENABLE_EXTENSIONS=nanoair \
+            COMPRESS_OUTPUTIMAGE=sha,img,xz
+
+      - name: Upload image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-nanopiair
+          path: output/images/*
+          retention-days: 14
+          if-no-files-found: error

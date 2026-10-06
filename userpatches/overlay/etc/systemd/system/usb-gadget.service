@@ -1,0 +1,13 @@
+[Unit]
+Description=USB composite gadget: adb + UAC2 audio (4ch USB microphone)
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/usb-gadget.sh start
+ExecStop=/usr/local/sbin/usb-gadget.sh stop
+
+[Install]
+WantedBy=multi-user.target

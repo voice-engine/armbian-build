@@ -1,0 +1,8 @@
+# 板上原生编译 ALSA 插件（依赖: gcc libasound2-dev pkg-config）
+# 用法: make -f plugin-Makefile && sudo make -f plugin-Makefile install
+libasound_module_pcm_ac108.so: pcm_ac108_tag.c
+	gcc -shared -fPIC -DPIC -O2 -Wall pcm_ac108_tag.c $$(pkg-config --cflags --libs alsa) -o $@
+
+install: libasound_module_pcm_ac108.so
+	install -D -m 644 $< /usr/lib/$$(gcc --print-multiarch)/alsa-lib/$<
+	test -f /etc/asound.conf || echo 'pcm.ac108 { type ac108  slavepcm "hw:1,0" }' > /etc/asound.conf

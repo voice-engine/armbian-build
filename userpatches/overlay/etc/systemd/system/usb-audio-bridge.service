@@ -1,0 +1,15 @@
+[Unit]
+Description=Bridge ac108 4-mic array to the UAC2 gadget (USB microphone)
+After=usb-gadget.service sound.service
+Requires=usb-gadget.service
+
+[Service]
+# The "UAC2 Gadget" card appears when the gadget binds to the UDC; wait
+# for it so a service restart at boot does not race into a missing card.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 30 ]; do grep -q UAC2Gadget /proc/asound/cards 2>/dev/null && exit 0; sleep 1; i=$((i+1)); done; exit 1'
+ExecStart=/usr/bin/alsaloop -C ac108 -P hw:CARD=UAC2Gadget -f S32_LE -c 4 -r 48000 -B 8192 -E 1024
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
