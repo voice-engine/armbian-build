@@ -19,12 +19,14 @@ apt-get -y install --no-install-recommends alsa-utils adbd
 
 # 3) build + install the ALSA tag-decode ioplug (4ch/48k|16k capture from
 #    the micgen wire stream). Sources are read-only under /tmp/overlay.
-apt-get -y install --no-install-recommends gcc make pkg-config libasound2-dev
+#    libc6-dev is explicit: it is only a Recommends of gcc on Debian, so
+#    --no-install-recommends skips it and stdio.h would be missing.
+apt-get -y install --no-install-recommends gcc make pkg-config libasound2-dev libc6-dev
 cp -r /tmp/overlay/build /tmp/ac108-plugin
 make -C /tmp/ac108-plugin -f plugin-Makefile
 install -m 644 /tmp/ac108-plugin/libasound_module_pcm_ac108.so \
     /usr/lib/$(gcc --print-multiarch)/alsa-lib/
-apt-get -y purge gcc make pkg-config libasound2-dev
+apt-get -y purge gcc make pkg-config libasound2-dev libc6-dev
 apt-get -y autoremove
 
 # 4) services: gadget (adb + UAC2) and the ac108->UAC2 bridge.
