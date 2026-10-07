@@ -18,7 +18,9 @@ apt-get -qq update
 apt-get -y install --no-install-recommends alsa-utils adbd
 
 # 3) build + install the ALSA tag-decode ioplug (4ch/48k|16k capture from
-#    the micgen wire stream). Sources are read-only under /tmp/overlay.
+#    the voicen4mic wire stream). Sources are read-only under /tmp/overlay.
+#    NOTE: the gcc line in plugin-Makefile MUST keep -DPIC -- without it the
+#    plugin references libasound's unexported snd_dlsym_start and dlopen fails.
 #    libc6-dev is explicit: it is only a Recommends of gcc on Debian, so
 #    --no-install-recommends skips it and stdio.h would be missing.
 apt-get -y install --no-install-recommends gcc make pkg-config libasound2-dev libc6-dev
@@ -30,17 +32,19 @@ install -D -m 644 /tmp/ac108-plugin/libasound_module_pcm_ac108.so \
 apt-get -y purge gcc make pkg-config libasound2-dev libc6-dev
 apt-get -y autoremove
 
-# 4) services: gadget (adb + UAC2) and the ac108->UAC2 bridge.
+# 4) services: gadget (adb + UAC2). The ac108->UAC2 bridge service stays
+#    disabled by default (it occupies hw:1,0; start it manually).
 #    adbd itself is started by usb-gadget.sh once ffs is up (drop-in in overlay).
-systemctl enable usb-gadget.service usb-audio-bridge.service
+systemctl enable usb-gadget.service
 
 # 5) user + passwordless sudo (adb root shell is the primary access path)
 useradd -m -s /bin/bash i 2>/dev/null || true
 echo "i ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/i
 chmod 440 /etc/sudoers.d/i
 
-# 6) hold kernel packages: an apt upgrade would replace the DT and drop the
-#    in-tree ac108_init module. Upgrades happen by rebuilding this image.
+# 6) hold kernel packages: an apt upgrade would replace the DT and the
+#    in-tree snd-soc-ac108c codec module. Upgrades happen by rebuilding
+#    this image.
 apt-mark hold linux-image-current-sunxi linux-dtb-current-sunxi 2>/dev/null || true
 
 echo "nanoair: customize-image done"

@@ -1,5 +1,5 @@
 diff --git a/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-neo-air.dts b/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-neo-air.dts
-index 5d60216..7322fec 100644
+index 5d60216..db71242 100644
 --- a/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-neo-air.dts
 +++ b/arch/arm/boot/dts/allwinner/sun8i-h3-nanopi-neo-air.dts
 @@ -254,11 +254,11 @@
@@ -16,7 +16,7 @@ index 5d60216..7322fec 100644
  };
  
  &uart0 {
-@@ -294,3 +294,65 @@
+@@ -294,3 +294,77 @@
  	/* USB VBUS is always on */
  	status = "okay";
  };
@@ -47,9 +47,14 @@ index 5d60216..7322fec 100644
 +&i2c0 {
 +	status = "okay";
 +
++	/* AC108: ac108e stays first so the OF modalias keeps pointing at the
++	 * no longer shipped (dropped from this patch); the snd-soc-ac108c codec
++	 * driver binds via the second entry. Label gives the sound card a
++	 * proper phandle reference. */
 +	ac108: ac108@3b {
-+		compatible = "x-power,ac108e";
++		compatible = "x-power,ac108e", "x-power,ac108c";
 +		reg = <0x3b>;
++		#sound-dai-cells = <0>;
 +	};
 +};
 +
@@ -59,14 +64,21 @@ index 5d60216..7322fec 100644
 +};
 +
 +/*
-+ * Capture-only loopback card: both cpu and codec point at i2s0, so the
-+ * wire stream (AC108 encoded, 2ch x 2*rate) is exposed at hw:1,0 and is
-+ * decoded in userspace by the "ac108" ALSA ioplug.
++ * The legacy vendor-overlay sound card must never wake up and grab i2s0,
++ * so pin it disabled; the real 4-mic array card is "voicen4mic":
++ * cpu = i2s0 (H3 drives bitclock/frame), codec = the AC108 capture codec.
++ * The wire stream (2ch x 2*fs, channel tag in the low 2 bits of each
++ * word) is exposed at hw:1,0 and decoded in userspace by the "ac108"
++ * ALSA ioplug.
 + */
 +/ {
++	sound_voicen_mic {
++		status = "disabled";
++	};
++
 +	sound-micgen {
 +		compatible = "simple-audio-card";
-+		simple-audio-card,name = "micgen";
++		simple-audio-card,name = "voicen4mic";
 +		simple-audio-card,format = "i2s";
 +		simple-audio-card,mclk-fs = <128>;
 +		simple-audio-card,bitclock-master = <&cpudai>;
@@ -78,215 +90,428 @@ index 5d60216..7322fec 100644
 +		};
 +
 +		coddai: simple-audio-card,codec {
-+			sound-dai = <&i2s0>;
++			sound-dai = <&ac108>;
 +		};
 +	};
 +};
-diff --git a/sound/soc/sunxi/Kconfig b/sound/soc/sunxi/Kconfig
-index dfc66cb..077ffa5 100644
---- a/sound/soc/sunxi/Kconfig
-+++ b/sound/soc/sunxi/Kconfig
-@@ -88,4 +88,12 @@ config SND_SUN8I_ADDA_PR_REGMAP
+diff --git a/sound/soc/codecs/Kconfig b/sound/soc/codecs/Kconfig
+index 8da75f2..77db3eb 100644
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -16,6 +16,7 @@ config SND_SOC_ALL_CODECS
+ 	depends on COMPILE_TEST
+ 	imply SND_SOC_88PM860X
+ 	imply SND_SOC_AB8500_CODEC
++	imply SND_SOC_AC108C
+ 	imply SND_SOC_AC200_CODEC
+ 	imply SND_SOC_AC97_CODEC
+ 	imply SND_SOC_AD1836
+@@ -428,6 +429,15 @@ config SND_SOC_AB8500_CODEC
  	tristate
- 	select REGMAP
+ 	depends on ABX500_CORE
  
-+config SND_SUNXI_AC108_INIT
-+	tristate "AC108 capture-only register recipe loader (NanoPi Air mic array)"
++config SND_SOC_AC108C
++	tristate "X-Powers AC108 encoding-mode capture codec (NanoPi Air mic array)"
 +	depends on I2C
 +	help
-+	  Loads the AC108 encoding-mode register recipe over I2C at boot.
-+	  No ASoC DAI/PCM registration happens here; capture goes through
-+	  the sun4i i2s simple-audio-card plus a userspace tag-decoding ioplug.
++	  Capture-only ASoC codec for the AC108 wired in encoding mode:
++	  the wire stream is 2ch x 2*fs with the channel tag in the low
++	  2 bits, decoded by the userspace "ac108" ALSA ioplug. Register
++	  setup (PLL/BCLK switching, sample rate) is fully automatic.
 +
- endmenu
-diff --git a/sound/soc/sunxi/Makefile b/sound/soc/sunxi/Makefile
-index 7d1a70b..ec1e969 100644
---- a/sound/soc/sunxi/Makefile
-+++ b/sound/soc/sunxi/Makefile
-@@ -9,3 +9,4 @@ obj-$(CONFIG_SND_SUN8I_CODEC) += sun8i-codec.o
- obj-$(CONFIG_SND_SUN8I_ADDA_PR_REGMAP) += sun8i-adda-pr-regmap.o
- obj-$(CONFIG_SND_SUN50I_DMIC) += sun50i-dmic.o
- obj-$(CONFIG_SND_SUN9I_HDMI_AUDIO) += sun9i-hdmi-audio.o
-+obj-$(CONFIG_SND_SUNXI_AC108_INIT) += ac108_init.o
-diff --git a/sound/soc/sunxi/ac108_init.c b/sound/soc/sunxi/ac108_init.c
+ config SND_SOC_AC200_CODEC
+ 	tristate "AC200 Codec"
+ 	depends on MFD_AC200
+diff --git a/sound/soc/codecs/Makefile b/sound/soc/codecs/Makefile
+index 4a8ab8f..141f1a0 100644
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0
+ snd-soc-88pm860x-y := 88pm860x-codec.o
+ snd-soc-ab8500-codec-y := ab8500-codec.o
++snd-soc-ac108c-y := ac108c.o
+ snd-soc-ac200-y := ac200.o
+ snd-soc-ac97-y := ac97.o
+ snd-soc-ad1836-y := ad1836.o
+@@ -434,6 +435,7 @@ snd-soc-simple-mux-y := simple-mux.o
+ 
+ obj-$(CONFIG_SND_SOC_88PM860X)	+= snd-soc-88pm860x.o
+ obj-$(CONFIG_SND_SOC_AB8500_CODEC)	+= snd-soc-ab8500-codec.o
++obj-$(CONFIG_SND_SOC_AC108C)	+= snd-soc-ac108c.o
+ obj-$(CONFIG_SND_SOC_AC200_CODEC)	+= snd-soc-ac200.o
+ obj-$(CONFIG_SND_SOC_AC97_CODEC)	+= snd-soc-ac97.o
+ obj-$(CONFIG_SND_SOC_AD1836)	+= snd-soc-ad1836.o
+diff --git a/sound/soc/codecs/ac108c.c b/sound/soc/codecs/ac108c.c
 new file mode 100644
-index 0000000..d6144f0
+index 0000000..4f8cae3
 --- /dev/null
-+++ b/sound/soc/sunxi/ac108_init.c
-@@ -0,0 +1,176 @@
++++ b/sound/soc/codecs/ac108c.c
+@@ -0,0 +1,367 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * ac108_init - AC108 编码模式配方的内核化（纯 I2C 初始化驱动）
++ * ac108-codec - AC108 编码模式 capture codec（ASoC，结构照抄 seeed-voicecard master）
 + *
-+ * 绑定 DT 节点 /soc/i2c@1c2ac00/ac108@3b (compatible "x-power,ac108e"，
-+ * 旧 voicen overlay 遗留，设备存在但此前无驱动)。probe 即写整份寄存器配方，
-+ * 等价 ~/ac108/mic4-record.sh 的配置段；应用随后从 micgen 卡录线上流，
-+ * 或经 ALSA 插件 "ac108"（tag 解码）直录 4ch/32bit/48k。
-+ *
-+ * 不注册任何 ASoC/DAI/PCM —— 只碰 I2C，无 panic 风险面
-+ * （此前 boot panic 的是带 .playback DAI 的 snd-soc-ac108e 模块，与此无关）。
-+ *
-+ * 参数: mode=1(AC108 主,默认,需 ac108m DT)/0(H3 主)；DT 无节点时回退
-+ *       用 busnum/address 手工创建 i2c client。
++ * 线上流 = 2ch @ 2xfs 编码（低 2 位 tag），解码在用户空间（ac108 插件/voice_engine）。
++ * 配置全自动：
++ *   probe      上电配方（编码模式/4槽/恒等映射/晶振PLL/从机 GEN on）
++ *   hw_params  ADC 速率码 = 线上率/2（96k->8, 32k->3）；BCLK 源在用则换分频
++ *   trigger ST pll_bclk=1(默认) 时翻 BCLK-PLL（CPU DAI 先触发=BCLK 已在跑，0ppm）
++ *   trigger SP 退回晶振安全态（PLL 无 BCLK 使能永不捕获）
++ * DAPM 微件/路由 = seeed-voicecard ac108.c 原版（生产验证）。
++ * 仅 capture DAI（历史 panic 模块带 playback DAI，刻意不做）。
++ * compatible = "x-power,ac108c"（独立于 ac108_init 的 x-power,ac108e，避免 OF
++ * modalias 双加载；DT 由 micgen-mode.sh codec 分支追加）。
 + */
 +#include <linux/module.h>
 +#include <linux/i2c.h>
 +#include <linux/delay.h>
-+#include <linux/of.h>
++#include <linux/slab.h>
++#include <sound/soc.h>
++#include <sound/pcm.h>
++#include <sound/tlv.h>
 +
-+static int mode = 1;
-+static int busnum = 0;
-+static int address = 0x3b;	/* 0x3b */
++static int pll_bclk = 1;	/* 1=trigger 翻 BCLK-PLL(0ppm) 0=保持晶振 */
++module_param(pll_bclk, int, 0444);
++MODULE_PARM_DESC(pll_bclk, "1=BCLK-PLL on trigger (0ppm), 0=crystal PLL");
 +
-+module_param(mode, int, 0644);
-+module_param(busnum, int, 0444);
-+module_param(address, int, 0444);
-+MODULE_PARM_DESC(mode, "1=AC108 I2S master (default, needs ac108m DT), 0=H3 master");
++/* AC108 寄存器位（照抄 seeed ac108.h，仅本驱动用到的） */
++#define ADC_DIG_EN			0x61
++#define ENAD1				0
++#define ENAD2				1
++#define ENAD3				2
++#define ENAD4				3
++#define DG_EN				4
++#define DMIC_EN				0x62
++#define ANA_ADC1_CTRL1			0xa0
++#define ADC1_DSM_ENABLE			2
++#define ADC1_PGA_ENABLE			1
++#define ADC1_MICBIAS_EN			0
++#define ANA_ADC2_CTRL1			0xa7
++#define ADC2_DSM_ENABLE			2
++#define ADC2_PGA_ENABLE			1
++#define ADC2_MICBIAS_EN			0
++#define ANA_ADC3_CTRL1			0xae
++#define ADC3_DSM_ENABLE			2
++#define ADC3_PGA_ENABLE			1
++#define ADC3_MICBIAS_EN			0
++#define ANA_ADC4_CTRL1			0xb5
++#define ADC4_DSM_ENABLE			2
++#define ADC4_PGA_ENABLE			1
++#define ADC4_MICBIAS_EN			0
++#define ANA_ADC4_CTRL6			0xba
++#define DSM_DEMOFF			5
++#define ANA_ADC4_CTRL7			0xbb
++#define ADC1_CLK_GATING			0
++#define ADC2_CLK_GATING			1
++#define ADC3_CLK_GATING			2
++#define ADC4_CLK_GATING			3
 +
-+static struct i2c_client *cli;
-+static bool bound_via_dt;
++struct ac108_priv {
++	struct i2c_client	*client;
++	bool			codec_slave;
++	bool			bclk_pll;
++	unsigned int		wire_rate;	/* 32000|96000 */
++};
++
++static int wr(struct ac108_priv *ac, u8 reg, u8 val)
++{
++	int ret = i2c_smbus_write_byte_data(ac->client, reg, val);
++	if (ret < 0)
++		dev_err(&ac->client->dev, "wr 0x%02x<-0x%02x: %d\n", reg, val, ret);
++	return ret;
++}
++
++static int rd(struct ac108_priv *ac, u8 reg)
++{
++	return i2c_smbus_read_byte_data(ac->client, reg);
++}
 +
 +static const struct regval {
 +	u8 reg, val;
 +} recipe[] = {
 +	{0x06, 0x01}, {0x07, 0x19}, {0x09, 0x09},	/* 模拟 LDO/VREF */
-+	{0x11, 4}, {0x12, 0}, {0x13, 128}, {0x14, 24},	/* PLL 24M->24.576M (精确) */
++	{0x11, 4}, {0x12, 0}, {0x13, 128}, {0x14, 24},	/* 晶振 PLL 24M->24.576M */
 +	{0x18, 0x01}, {0x10, 0x0b},			/* PLL 锁定/使能 */
-+	{0x20, 0x89},	/* SYSCLK<-PLL: 必须 0x89(bit3)! 0x83 实为 MCLK 直通 24M */
++	{0x20, 0x89},	/* SYSCLK<-PLL（0x89: bit3=PLL源；0x83=MCLK直通24M 陷阱）*/
 +	{0x21, 0x95}, {0x22, 0x95},			/* 模块时钟/复位释放 */
-+	{0x32, 0x00},
-+	{0x34, 0x5d},	/* 编码模式(ENCD_SEL=bit6)+LJ+偏移 —— 0x3d 不是编码 */
++	{0x31, 0x00}, {0x32, 0x00},
++	{0x34, 0x5d},	/* 编码模式(ENCD_SEL=bit6)+LJ —— 0x3d 不是编码位 */
 +	{0x35, 0x77},	/* 32bit 采样 + 32bit slot */
-+	{0x33, 31},	/* LRCK 半周期 32 BCLK -> 线上 96k (=2x48k) */
-+	{0x36, 0x60},	/* SEXT=11 */
++	{0x33, 31},	/* LRCK 半周期 32 BCLK -> 线上 = 2xfs */
++	{0x36, 0x60},
 +	{0x38, 3}, {0x39, 0x0f}, {0x3a, 0x00},		/* TX1 = 4 槽 */
-+	{0x3c, 0xe4},	/* slot1..4 <- adc1..4 恒等 */
-+	{0x60, 8},	/* ADC 真实 48k */
-+	{0x66, 0x0f},	/* HPF */
-+	{0x61, 0x1f},	/* 4 路 ADC */
-+	{0xa0, 7}, {0xa7, 7}, {0xae, 7}, {0xb5, 7},	/* micbias+PGA+DSM */
++	{0x3c, 0xe4},	/* slot1..4 <- adc1..4 恒等（tag=ADC序号-1）*/
++	{0x60, 8},	/* ADC 速率码（hw_params 校正：96k线->8, 32k线->3）*/
++	{0x66, 0x0f},
++	{0x61, 0x1f},
++	{0xa0, 7}, {0xa7, 7}, {0xae, 7}, {0xb5, 7},
 +	{0xbb, 0x0f}, {0xba, 0},
-+	{0x90, 0}, {0x91, 0}, {0x92, 0}, {0x93, 0},	/* PGA 0dB */
-+	{0x70, 222}, {0x71, 222}, {0x72, 222}, {0x73, 222},	/* 数字音量 +47dB */
++	{0x90, 0}, {0x91, 0}, {0x92, 0}, {0x93, 0},
++	{0x70, 222}, {0x71, 222}, {0x72, 222}, {0x73, 222},
 +};
 +
-+static int wr(u8 reg, u8 val)
++/* BCLK-PLL 分频表（seeed 原厂表条目，FIN=BCLK=2*fs*64 -> 24.576M） */
++static void write_dividers(struct ac108_priv *ac, int bclk)
 +{
-+	int ret = i2c_smbus_write_byte_data(cli, reg, val);
-+	if (ret < 0)
-+		pr_err("ac108_init: write 0x%02x<-0x%02x failed: %d\n", reg, val, ret);
-+	return ret;
-+}
-+
-+static int rd(u8 reg)
-+{
-+	return i2c_smbus_read_byte_data(cli, reg);
-+}
-+
-+static int apply_recipe(void)
-+{
-+	int ret, i;
-+
-+	/* CHIP_RST: 本芯片复位值是 0x00（0x12 NAK） */
-+	if ((ret = wr(0x00, 0x00)))
-+		return ret;
-+	msleep(500);
-+	if ((ret = wr(0x30, 0x00)))	/* GEN off，安静配置 */
-+		return ret;
-+
-+	for (i = 0; i < ARRAY_SIZE(recipe); i++)
-+		if ((ret = wr(recipe[i].reg, recipe[i].val)))
-+			return ret;
-+
-+	if (mode) {
-+		wr(0x31, 0x03);		/* 主: BCLK=SYSCLK/4=6.144M */
-+		wr(0x30, 0xf5);		/* 主: AC108 驱动 BCLK/LRCK */
-+	} else {
-+		wr(0x31, 0x00);
-+		wr(0x30, 0x35);		/* 从: H3 驱动时钟 */
++	if (bclk) {
++		if (ac->wire_rate == 32000) {	/* BCLK 2.048M */
++			wr(ac, 0x11, 0); wr(ac, 0x12, 0); wr(ac, 0x13, 240); wr(ac, 0x14, 0x29);
++		} else {			/* BCLK 6.144M */
++			wr(ac, 0x11, 4); wr(ac, 0x12, 1); wr(ac, 0x13, 144); wr(ac, 0x14, 0x29);
++		}
++	} else {				/* 晶振 24M -> 24.576M */
++		wr(ac, 0x11, 4); wr(ac, 0x12, 0); wr(ac, 0x13, 128); wr(ac, 0x14, 24);
 +	}
++}
 +
-+	pr_info("ac108_init: recipe applied (mode=%s) "
-+		"0x20=%02x 0x34=%02x 0x38=%02x 0x3c=%02x\n",
-+		mode ? "AC108-master" : "H3-master",
-+		rd(0x20), rd(0x34), rd(0x38), rd(0x3c));
++/* ---------------- DAPM（照抄 seeed-voicecard ac108.c） ---------------- */
++
++static const struct snd_soc_dapm_widget ac108_dapm_widgets[] = {
++	SND_SOC_DAPM_INPUT("MIC1P"), SND_SOC_DAPM_INPUT("MIC1N"),
++	SND_SOC_DAPM_INPUT("MIC2P"), SND_SOC_DAPM_INPUT("MIC2N"),
++	SND_SOC_DAPM_INPUT("MIC3P"), SND_SOC_DAPM_INPUT("MIC3N"),
++	SND_SOC_DAPM_INPUT("MIC4P"), SND_SOC_DAPM_INPUT("MIC4N"),
++	SND_SOC_DAPM_INPUT("DMIC1"), SND_SOC_DAPM_INPUT("DMIC2"),
++
++	SND_SOC_DAPM_AIF_IN("Channel 1 AAF", "Capture", 0, ANA_ADC1_CTRL1, ADC1_DSM_ENABLE, 1),
++	SND_SOC_DAPM_SUPPLY("Channel 1 EN", ANA_ADC1_CTRL1, ADC1_PGA_ENABLE, 1, NULL, 0),
++	SND_SOC_DAPM_MICBIAS("MIC1BIAS", ANA_ADC1_CTRL1, ADC1_MICBIAS_EN, 1),
++
++	SND_SOC_DAPM_AIF_IN("Channel 2 AAF", "Capture", 0, ANA_ADC2_CTRL1, ADC2_DSM_ENABLE, 1),
++	SND_SOC_DAPM_SUPPLY("Channel 2 EN", ANA_ADC2_CTRL1, ADC2_PGA_ENABLE, 1, NULL, 0),
++	SND_SOC_DAPM_MICBIAS("MIC2BIAS", ANA_ADC2_CTRL1, ADC2_MICBIAS_EN, 1),
++
++	SND_SOC_DAPM_AIF_IN("Channel 3 AAF", "Capture", 0, ANA_ADC3_CTRL1, ADC3_DSM_ENABLE, 1),
++	SND_SOC_DAPM_SUPPLY("Channel 3 EN", ANA_ADC3_CTRL1, ADC3_PGA_ENABLE, 1, NULL, 0),
++	SND_SOC_DAPM_MICBIAS("MIC3BIAS", ANA_ADC3_CTRL1, ADC3_MICBIAS_EN, 1),
++
++	SND_SOC_DAPM_AIF_IN("Channel 4 AAF", "Capture", 0, ANA_ADC4_CTRL1, ADC4_DSM_ENABLE, 1),
++	SND_SOC_DAPM_SUPPLY("Channel 4 EN", ANA_ADC4_CTRL1, ADC4_PGA_ENABLE, 1, NULL, 0),
++	SND_SOC_DAPM_MICBIAS("MIC4BIAS", ANA_ADC4_CTRL1, ADC4_MICBIAS_EN, 1),
++
++	SND_SOC_DAPM_SUPPLY("ADC EN", ADC_DIG_EN, DG_EN, 1, NULL, 0),
++	SND_SOC_DAPM_ADC("ADC1", "Capture", ADC_DIG_EN, ENAD1, 1),
++	SND_SOC_DAPM_ADC("ADC2", "Capture", ADC_DIG_EN, ENAD2, 1),
++	SND_SOC_DAPM_ADC("ADC3", "Capture", ADC_DIG_EN, ENAD3, 1),
++	SND_SOC_DAPM_ADC("ADC4", "Capture", ADC_DIG_EN, ENAD4, 1),
++
++	SND_SOC_DAPM_SUPPLY("ADC1 CLK", ANA_ADC4_CTRL7, ADC1_CLK_GATING, 1, NULL, 0),
++	SND_SOC_DAPM_SUPPLY("ADC2 CLK", ANA_ADC4_CTRL7, ADC2_CLK_GATING, 1, NULL, 0),
++	SND_SOC_DAPM_SUPPLY("ADC3 CLK", ANA_ADC4_CTRL7, ADC3_CLK_GATING, 1, NULL, 0),
++	SND_SOC_DAPM_SUPPLY("ADC4 CLK", ANA_ADC4_CTRL7, ADC4_CLK_GATING, 1, NULL, 0),
++
++	SND_SOC_DAPM_SUPPLY("DSM EN", ANA_ADC4_CTRL6, DSM_DEMOFF, 1, NULL, 0),
++
++	SND_SOC_DAPM_MICBIAS("DMIC1 enable", DMIC_EN, 0, 0),
++	SND_SOC_DAPM_MICBIAS("DMIC2 enable", DMIC_EN, 1, 0),
++};
++
++static const struct snd_soc_dapm_route ac108_dapm_routes[] = {
++	{ "ADC1", NULL, "Channel 1 AAF" },
++	{ "ADC2", NULL, "Channel 2 AAF" },
++	{ "ADC3", NULL, "Channel 3 AAF" },
++	{ "ADC4", NULL, "Channel 4 AAF" },
++
++	{ "Channel 1 AAF", NULL, "MIC1BIAS" },
++	{ "Channel 2 AAF", NULL, "MIC2BIAS" },
++	{ "Channel 3 AAF", NULL, "MIC3BIAS" },
++	{ "Channel 4 AAF", NULL, "MIC4BIAS" },
++
++	{ "MIC1BIAS", NULL, "ADC1 CLK" },
++	{ "MIC2BIAS", NULL, "ADC2 CLK" },
++	{ "MIC3BIAS", NULL, "ADC3 CLK" },
++	{ "MIC4BIAS", NULL, "ADC4 CLK" },
++
++	{ "ADC1 CLK", NULL, "DSM EN" },
++	{ "ADC2 CLK", NULL, "DSM EN" },
++	{ "ADC3 CLK", NULL, "DSM EN" },
++	{ "ADC4 CLK", NULL, "DSM EN" },
++
++	{ "DSM EN", NULL, "ADC EN" },
++
++	{ "Channel 1 EN", NULL, "DSM EN" },
++	{ "Channel 2 EN", NULL, "DSM EN" },
++	{ "Channel 3 EN", NULL, "DSM EN" },
++	{ "Channel 4 EN", NULL, "DSM EN" },
++
++	{ "MIC1P", NULL, "Channel 1 EN" },
++	{ "MIC1N", NULL, "Channel 1 EN" },
++	{ "MIC2P", NULL, "Channel 2 EN" },
++	{ "MIC2N", NULL, "Channel 2 EN" },
++	{ "MIC3P", NULL, "Channel 3 EN" },
++	{ "MIC3N", NULL, "Channel 3 EN" },
++	{ "MIC4P", NULL, "Channel 4 EN" },
++	{ "MIC4N", NULL, "Channel 4 EN" },
++};
++
++/* ---------------- DAI ops ---------------- */
++
++static int ac108_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
++{
++	struct ac108_priv *ac = snd_soc_dai_get_drvdata(dai);
++
++	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
++	case SND_SOC_DAIFMT_CBP_CFC:	/* AC108 从机（时钟 consumer，唯一支持）*/
++		ac->codec_slave = true;
++		break;
++	default:
++		ac->codec_slave = false;
++		return -ENOTSUPP;
++	}
 +	return 0;
 +}
 +
-+static int ac108_probe(struct i2c_client *client)
++static int ac108_hw_params(struct snd_pcm_substream *ss,
++			   struct snd_pcm_hw_params *p, struct snd_soc_dai *dai)
 +{
-+	cli = client;
-+	bound_via_dt = true;
-+	return apply_recipe();
++	struct ac108_priv *ac = snd_soc_dai_get_drvdata(dai);
++	unsigned int rate = params_rate(p);
++	unsigned int fs = rate / 2;
++	int src, lock;
++
++	if (ss->stream != SNDRV_PCM_STREAM_CAPTURE)
++		return -EINVAL;
++	if (fs != 48000 && fs != 16000)
++		return -EINVAL;
++	ac->wire_rate = rate;
++
++	wr(ac, 0x60, (fs == 16000) ? 3 : 8);
++
++	/* BCLK 源在用时: 锁定=线上有钟 -> 换分频+EN 重锁; 失锁 -> 退晶振安全态 */
++	src = rd(ac, 0x20);
++	lock = (rd(ac, 0x10) & 0x04) != 0;
++	if ((src & 0x10) && lock) {
++		write_dividers(ac, 1);
++		wr(ac, 0x10, 0x0a); wr(ac, 0x10, 0x0b);
++	} else if ((src & 0x10) && !lock) {
++		write_dividers(ac, 0);
++		wr(ac, 0x20, 0x89);
++	}
++	dev_info(&ac->client->dev, "hw_params: wire=%u fs=%u 0x60=%02x\n",
++		 rate, fs, rd(ac, 0x60));
++	return 0;
 +}
 +
-+static void ac108_remove(struct i2c_client *client)
++static int ac108_trigger(struct snd_pcm_substream *ss, int cmd, struct snd_soc_dai *dai)
 +{
-+	wr(0x30, 0x00);		/* GEN off */
-+	pr_info("ac108_init: removed\n");
++	struct ac108_priv *ac = snd_soc_dai_get_drvdata(dai);
++
++	if (!ac->bclk_pll || !ac->codec_slave)
++		return 0;
++
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		/* CPU DAI 已先触发 => BCLK 在跑；已锁晶振状态下翻源自动重捕获 */
++		write_dividers(ac, 1);
++		wr(ac, 0x20, 0x99);
++		dev_info(&ac->client->dev, "trigger: BCLK-PLL on (0x20=%02x 0x10=%02x)\n",
++			 rd(ac, 0x20), rd(ac, 0x10));
++		break;
++	case SNDRV_PCM_TRIGGER_STOP:
++	case SNDRV_PCM_TRIGGER_SUSPEND:
++		write_dividers(ac, 0);
++		wr(ac, 0x20, 0x89);
++		dev_info(&ac->client->dev, "trigger: back to crystal PLL\n");
++		break;
++	}
++	return 0;
++}
++
++static const struct snd_soc_dai_ops ac108_dai_ops = {
++	.set_fmt	= ac108_set_fmt,
++	.hw_params	= ac108_hw_params,
++	.trigger	= ac108_trigger,
++};
++
++static struct snd_soc_dai_driver ac108_dai = {
++	.name = "ac108-hifi",
++	.capture = {
++		.stream_name	= "Capture",
++		.channels_min	= 2,
++		.channels_max	= 2,
++		.rates		= SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_96000,
++		.formats	= SNDRV_PCM_FMTBIT_S32_LE,
++	},
++	.ops = &ac108_dai_ops,
++};
++
++/* 组件读写回调（DAPM 微件经此写寄存器；签名与 6.18 snd_soc_component_driver 匹配） */
++static int ac108_comp_write(struct snd_soc_component *c, unsigned int reg,
++			    unsigned int val)
++{
++	struct ac108_priv *ac = dev_get_drvdata(c->dev);
++	return wr(ac, reg, val);
++}
++
++static unsigned int ac108_comp_read(struct snd_soc_component *c,
++				     unsigned int reg)
++{
++	struct ac108_priv *ac = dev_get_drvdata(c->dev);
++	return (unsigned int)max(rd(ac, reg), 0);
++}
++
++static const struct snd_soc_component_driver ac108_component = {
++	.name			= "ac108-codec",
++	.read			= ac108_comp_read,
++	.write			= ac108_comp_write,
++	.dapm_widgets		= ac108_dapm_widgets,
++	.num_dapm_widgets	= ARRAY_SIZE(ac108_dapm_widgets),
++	.dapm_routes		= ac108_dapm_routes,
++	.num_dapm_routes	= ARRAY_SIZE(ac108_dapm_routes),
++	.idle_bias_on		= 1,
++	.use_pmdown_time	= 1,
++};
++
++static int ac108_codec_probe(struct i2c_client *client)
++{
++	struct ac108_priv *ac;
++	int i;
++
++	ac = devm_kzalloc(&client->dev, sizeof(*ac), GFP_KERNEL);
++	if (!ac)
++		return -ENOMEM;
++	ac->client = client;
++	ac->bclk_pll = pll_bclk;
++	i2c_set_clientdata(client, ac);
++
++	/* CHIP_RST: 本芯片复位值 0x00（0x12 NAK）*/
++	wr(ac, 0x00, 0x00);
++	msleep(500);
++	wr(ac, 0x30, 0x00);
++	for (i = 0; i < ARRAY_SIZE(recipe); i++)
++		wr(ac, recipe[i].reg, recipe[i].val);
++	wr(ac, 0x30, 0x35);	/* 从机: SDO+TXEN+GEN（H3 驱动时钟）*/
++
++	dev_info(&client->dev, "probed (bclk-pll=%d), recipe armed\n", ac->bclk_pll);
++	return devm_snd_soc_register_component(&client->dev, &ac108_component,
++					       &ac108_dai, 1);
 +}
 +
 +static const struct of_device_id ac108_of_match[] = {
-+	{ .compatible = "x-power,ac108e" },
-+	{ .compatible = "x-power,ac108_0" },
++	{ .compatible = "x-power,ac108c" },
 +	{ }
 +};
 +MODULE_DEVICE_TABLE(of, ac108_of_match);
 +
 +static struct i2c_device_id ac108_ids[] = {
-+	{ "ac108-ctrl" },
++	{ "ac108-codec" },
 +	{ }
 +};
 +MODULE_DEVICE_TABLE(i2c, ac108_ids);
 +
-+static struct i2c_driver ac108_driver = {
++static struct i2c_driver ac108_codec_driver = {
 +	.driver = {
-+		.name		= "ac108-init",
++		.name		= "ac108-codec",
 +		.of_match_table	= ac108_of_match,
 +	},
-+	.probe		= ac108_probe,
-+	.remove		= ac108_remove,
++	.probe		= ac108_codec_probe,
 +	.id_table	= ac108_ids,
 +};
++module_i2c_driver(ac108_codec_driver);
 +
-+static int __init ac108_init_mod(void)
-+{
-+	int ret = i2c_add_driver(&ac108_driver);
-+	if (ret)
-+		return ret;
-+	if (!bound_via_dt) {
-+		/* DT 无节点时回退：手工创建 client */
-+		struct i2c_adapter *adap = i2c_get_adapter(busnum);
-+		if (!adap) {
-+			i2c_del_driver(&ac108_driver);
-+			return -ENODEV;
-+		}
-+		cli = i2c_new_client_device(adap, &(struct i2c_board_info){
-+				I2C_BOARD_INFO("ac108-ctrl", address) });
-+		i2c_put_adapter(adap);
-+		if (IS_ERR(cli)) {
-+			ret = PTR_ERR(cli);
-+			i2c_del_driver(&ac108_driver);
-+			return ret;
-+		}
-+		ret = apply_recipe();
-+		if (ret) {
-+			i2c_unregister_device(cli);
-+			i2c_del_driver(&ac108_driver);
-+		}
-+	}
-+	return ret;
-+}
-+
-+static void __exit ac108_exit_mod(void)
-+{
-+	if (!bound_via_dt && cli)
-+		i2c_unregister_device(cli);
-+	i2c_del_driver(&ac108_driver);
-+}
-+
-+module_init(ac108_init_mod);
-+module_exit(ac108_exit_mod);
 +MODULE_AUTHOR("i");
-+MODULE_DESCRIPTION("AC108 encoding-mode register recipe loader (capture init only)");
++MODULE_DESCRIPTION("AC108 encoding-mode capture codec (seeed-voicecard style, auto config)");
 +MODULE_LICENSE("GPL v2");

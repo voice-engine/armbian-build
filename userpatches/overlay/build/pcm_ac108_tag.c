@@ -21,10 +21,6 @@
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #endif
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/i2c-dev.h>
 
 /* BCLK-PLL：把 AC108 的 PLL 输入从板载晶振翻到 I2S BCLK（H3 主模式），
  * speaker 与 mic 完全同钟（实测钟差 -0.04ppm vs 晶振 -3.8ppm）。
@@ -32,70 +28,24 @@
  * 分频: 6.144MHz(BCLK) ×400/((4+1)(9+1)(1+1)) = 24.576MHz（seeed 原厂表） */
 static int dbg;
 #define DBG(...) do { if (dbg) fprintf(stderr, __VA_ARGS__); } while (0)
-/* 仅 H3 主(ac108m DT 相反: h3m)模式下允许翻源——AC108 主机模式时 BCLK 由
- * 自己产生，PLL 吃自己的 BCLK 会自激。读 DT 判断当前 bitclock-master。 */
-static int ac108_bclk_mode_ok(void)
+/* 速率/PLL 配置全部由内核驱动 ac108_init 负责（sysfs 参数, 寄存器时序在内核侧）。
+ * 本插件仅在首次 transfer 时把流速率(+可选 pll_bclk=1, 0ppm 相干)通知驱动。 */
+static void ac108_notify_driver(unsigned int rate, int pll_bclk)
 {
 	FILE *f;
-	char bcm[16] = "", cpuph[16] = "";
-	f = fopen("/proc/device-tree/sound-micgen/simple-audio-card,bitclock-master", "r");
-	if (!f) return 0;
-	fread(bcm, 1, 4, f); fclose(f);
-	f = fopen("/proc/device-tree/sound-micgen/simple-audio-card,cpu/phandle", "r");
-	if (!f) return 0;
-	fread(cpuph, 1, 4, f); fclose(f);
-	return memcmp(bcm, cpuph, 4) == 0;	/* cpu 是 master => H3 主模式 */
+
+	if (pll_bclk > 0) {
+		f = fopen("/sys/module/ac108_init/parameters/pll_bclk", "w");
+		if (f) { fprintf(f, "1"); fclose(f); }
+		else SNDERR("ac108: ac108_init driver not loaded, PLL left as-is");
+	}
+	f = fopen("/sys/module/ac108_init/parameters/rate", "w");
+	if (f) { fprintf(f, "%u", rate); fclose(f); }
+	else SNDERR("ac108: ac108_init driver not loaded, chip rate not switched");
 }
 
-struct ac108_regval { int reg; unsigned char val; };
-
-static void ac108_setup_rate_pll(unsigned int rate, int pll_bclk)
-{
-	/* BCLK = 2*rate*64 -> PLL 表条目（FIN×N/((M1+1)(M2+1)(K1+1)(K2+1)) = 24.576M）
-	 * 48000: BCLK 6.144M, m1=4 n=400(0x190) | 16000: BCLK 2.048M, m1=0 n=240(0xF0)
-	 * ADC_SPRC(0x60): 48000->8, 16000->3 */
-	struct ac108_regval pll48[] = {{0x11,4},{0x12,1},{0x13,144},{0x14,0x29}};
-	struct ac108_regval pll16[] = {{0x11,0},{0x12,0},{0x13,240},{0x14,0x29}};
-	struct ac108_regval *pll = (rate == 16000) ? pll16 : pll48;
-	struct ac108_regval w[6];
-	int n = 0, i, fd, do_pll;
-	unsigned char buf[2];
-
-	DBG("setup_rate_pll: rate=%u pll_bclk=%d\n", rate, pll_bclk);
-	do_pll = pll_bclk && ac108_bclk_mode_ok();
-	DBG("  do_pll=%d\n", do_pll);
-	if (pll_bclk && !ac108_bclk_mode_ok())
-		SNDERR("ac108: pll_bclk ignored (DT is ac108m/AC108-master); use h3m DT");
-
-	w[n++] = (struct ac108_regval){0x60, (rate == 16000) ? 3 : 8};	/* ADC 速率 */
-	if (do_pll) {
-		for (i = 0; i < 4; i++)
-			w[n++] = pll[i];
-		w[n++] = (struct ac108_regval){0x20, 0x99};			/* PLL 源<-BCLK */
-	}
-
-	fd = open("/dev/i2c-0", O_RDWR);
-	DBG("  open(/dev/i2c-0)=%d errno=%d\n", fd, errno);
-	if (fd < 0) {
-		SNDERR("ac108: needs /dev/i2c-0 access (run with sudo), staying on module default");
-		return;
-	}
-	i = ioctl(fd, I2C_SLAVE_FORCE, 0x3b)	/* 0x3b 被 ac108_init 驱动绑定, FORCE 才可用 */;
-	DBG("  ioctl(I2C_SLAVE)=%d errno=%d\n", i, errno);
-	if (i < 0) {
-		close(fd);
-		return;
-	}
-	for (i = 0; i < n; i++) {
-		buf[0] = w[i].reg; buf[1] = w[i].val;
-		int rr = write(fd, buf, 2);
-		DBG("  i2c w 0x%02x<-0x%02x rr=%d\n", w[i].reg, w[i].val, rr);
-		if (rr != 2)
-			SNDERR("ac108: write 0x%02x failed", w[i].reg);
-	}
-	close(fd);
-}
-
+static int dbg;
+#define DBG(...) do { if (dbg) fprintf(stderr, __VA_ARGS__); } while (0)
 struct ac108_plug {
 	snd_pcm_ioplug_t io;
 	snd_pcm_t *slave;
@@ -150,7 +100,7 @@ static snd_pcm_sframes_t ac108_transfer(snd_pcm_ioplug_t *io,
 	DBG("transfer size=%lu slave=%lu state=%d\n", size, size * 2, snd_pcm_state(p->slave));
 	if (!p->flipped) {
 		p->flipped = 1;
-		ac108_setup_rate_pll(io->rate, p->pll_bclk);	/* ADC 速率 + 可选 BCLK-PLL */
+		ac108_notify_driver(io->rate, p->pll_bclk);	/* 通知内核驱动切速率/PLL */
 	}
 	r = snd_pcm_readi(p->slave, src, size * 2);
 	DBG("  readi=%ld state=%d\n", (long)r, snd_pcm_state(p->slave));
@@ -168,12 +118,20 @@ static snd_pcm_sframes_t ac108_transfer(snd_pcm_ioplug_t *io,
 	n = r / 2;			/* 实得 io 帧数（slave 帧的一半） */
 
 	for (ch = 0; ch < 4; ch++) {
-		int32_t *dst = (int32_t *)((char *)areas[ch].addr +
+		char *base = (char *)areas[ch].addr +
 			(areas[ch].first / 8) +
-			offset * (areas[ch].step / 8));
-		int step = areas[ch].step / 8 / sizeof(int32_t);
-		for (k = 0; k < n; k++)
-			dst[k * step] = src[k * 4 + ch] & ~3;	/* 清 tag 位 */
+			offset * (areas[ch].step / 8);
+		if (io->format == SND_PCM_FORMAT_S16_LE) {
+			int16_t *dst = (int16_t *)base;
+			int step = areas[ch].step / 8 / sizeof(int16_t);
+			for (k = 0; k < n; k++)
+				dst[k * step] = src[k * 4 + ch] >> 16;
+		} else {
+			int32_t *dst = (int32_t *)base;
+			int step = areas[ch].step / 8 / sizeof(int32_t);
+			for (k = 0; k < n; k++)
+				dst[k * step] = src[k * 4 + ch] & ~3;	/* 清 tag 位 */
+		}
 	}
 	free(src);
 	return n;
@@ -273,7 +231,7 @@ static snd_pcm_ioplug_callback_t ac108_ops = {
 static int ac108_set_constraints(snd_pcm_ioplug_t *io)
 {
 	static const unsigned int access[] = { SND_PCM_ACCESS_RW_INTERLEAVED };
-	static const unsigned int formats[] = { SND_PCM_FORMAT_S32_LE };
+	static const unsigned int formats[] = { SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_S16_LE };
 	static const unsigned int rates[] = { 48000, 16000 };
 	static const unsigned int channels[] = { 4 };
 	int err;

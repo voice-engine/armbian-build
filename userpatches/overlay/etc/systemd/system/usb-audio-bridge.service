@@ -1,13 +1,13 @@
 [Unit]
-Description=Bridge ac108 4-mic array to the UAC2 gadget (USB microphone)
-After=usb-gadget.service sound.service
-Requires=usb-gadget.service
+Description=AC108 4-mic -> UAC2 USB microphone bridge (alsaloop)
+# 默认 disabled：手动 sudo systemctl start usb-audio-bridge
+# 与板端直录互占 hw:1,0（直录前先 stop）
+After=usb-gadget.service sound.target
+Wants=usb-gadget.service
 
 [Service]
-# The "UAC2 Gadget" card appears when the gadget binds to the UDC; wait
-# for it so a service restart at boot does not race into a missing card.
-ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 30 ]; do grep -q UAC2Gadget /proc/asound/cards 2>/dev/null && exit 0; sleep 1; i=$((i+1)); done; exit 1'
-ExecStart=/usr/bin/alsaloop -C ac108 -P hw:CARD=UAC2Gadget -f S32_LE -c 4 -r 48000 -B 8192 -E 1024
+Type=simple
+ExecStart=/usr/bin/alsaloop -C ac108 -P hw:CARD=UAC2Gadget -f S16_LE -c 4 -r 48000 -U
 Restart=always
 RestartSec=2
 
